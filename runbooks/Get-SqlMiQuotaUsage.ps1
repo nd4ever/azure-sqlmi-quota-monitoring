@@ -6,10 +6,11 @@
     Collects regional Azure SQL Managed Instance vCore quota usage.
 .DESCRIPTION
     Uses the Azure Automation Account system-assigned managed identity to read
-    Microsoft.Sql regional usage and send selected counters to an Azure Monitor
-    direct Data Collection Rule endpoint.
-.PARAMETER SubscriptionIdsJson
-    JSON array of source subscription IDs.
+    Microsoft.Sql regional usage from every accessible subscription in a tenant
+    and send selected counters to an Azure Monitor direct Data Collection Rule
+    endpoint.
+.PARAMETER TenantId
+    Microsoft Entra tenant containing the subscriptions to query.
 .PARAMETER RegionsJson
     JSON array of Azure region names to query.
 .PARAMETER LogsIngestionEndpoint
@@ -20,39 +21,51 @@
     Input stream name declared by the Data Collection Rule.
 .PARAMETER UsageNamesJson
     JSON array of Microsoft.Sql usage counter names to collect.
+.PARAMETER SqlUsageApiVersion
+    API version used to query Microsoft.Sql regional usage.
+.PARAMETER LogsIngestionApiVersion
+    API version used to send records through the Logs Ingestion API.
 .PARAMETER MaxRetryCount
     Maximum retries after the initial request for transient HTTP failures.
 .EXAMPLE
-    ./Get-SqlMiQuotaUsage.ps1 -SubscriptionIdsJson '["00000000-0000-0000-0000-000000000000"]' -RegionsJson '["eastus2"]' -LogsIngestionEndpoint 'https://example.ingest.monitor.azure.com' -DcrImmutableId 'dcr-00000000000000000000000000000000' -StreamName 'Custom-SqlMiQuota'
+    ./Get-SqlMiQuotaUsage.ps1 -TenantId '00000000-0000-0000-0000-000000000000' -RegionsJson '["eastus2"]' -LogsIngestionEndpoint 'https://example.ingest.monitor.azure.com' -DcrImmutableId 'dcr-00000000000000000000000000000000' -StreamName 'Custom-SqlMiQuota'
 .NOTES
     Designed for the Azure Automation PowerShell 7.2 runtime.
 #>
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string]$SubscriptionIdsJson,
-
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string]$RegionsJson,
-
-    [Parameter(Mandatory = $true)]
-    [ValidatePattern('^https://[^/]+$')]
-    [string]$LogsIngestionEndpoint,
-
-    [Parameter(Mandatory = $true)]
-    [ValidatePattern('^dcr-[a-fA-F0-9]+$')]
-    [string]$DcrImmutableId,
-
-    [Parameter(Mandatory = $true)]
-    [ValidatePattern('^Custom-[A-Za-z][A-Za-z0-9_-]*$')]
-    [string]$StreamName,
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+    [string]$TenantId = '__TENANT_ID__',
 
     [Parameter(Mandatory = $false)]
     [ValidateNotNullOrEmpty()]
-    [string]$UsageNamesJson = '["SubscriptionSQLManagedInstanceStandardSeriesVCoreQuota","SubscriptionSQLManagedInstancePremiumSeriesVCoreQuota","SubscriptionSQLManagedInstancePremiumSeriesMemoryOptimizedVCoreQuota"]',
+    [string]$RegionsJson = '__REGIONS_JSON__',
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^https://[^/]+$')]
+    [string]$LogsIngestionEndpoint = '__LOGS_INGESTION_ENDPOINT__',
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^dcr-[a-fA-F0-9]+$')]
+    [string]$DcrImmutableId = '__DCR_IMMUTABLE_ID__',
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^Custom-[A-Za-z][A-Za-z0-9_-]*$')]
+    [string]$StreamName = '__STREAM_NAME__',
+
+    [Parameter(Mandatory = $false)]
+    [ValidateNotNullOrEmpty()]
+    [string]$UsageNamesJson = '__USAGE_NAMES_JSON__',
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^\d{4}-\d{2}-\d{2}(-preview)?$')]
+    [string]$SqlUsageApiVersion = '2023-08-01',
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^\d{4}-\d{2}-\d{2}(-preview)?$')]
+    [string]$LogsIngestionApiVersion = '2023-01-01',
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(0, 10)]
@@ -224,7 +237,18 @@ function Invoke-AzureRestRequest {
         catch {
             $StatusCode = Get-HttpStatusCode -ErrorRecord $_
             if ($Attempt -ge $MaxRetryCount -or -not (Test-TransientHttpStatusCode -StatusCode $StatusCode)) {
-                throw
+                $FailureMessage = if ([string]::IsNullOrWhiteSpace([string]$_.ErrorDetails.Message)) {
+                    $_.Exception.Message
+                }
+                else {
+                    $_.ErrorDetails.Message
+                }
+
+                if ($StatusCode -gt 0) {
+                    throw "$Method request to $Uri failed with HTTP $StatusCode. $FailureMessage"
+                }
+
+                throw "$Method request to $Uri failed. $FailureMessage"
             }
 
             $DelaySeconds = [Math]::Min([Math]::Pow(2, $Attempt + 1), 30)
@@ -232,6 +256,86 @@ function Invoke-AzureRestRequest {
             Start-Sleep -Seconds $DelaySeconds
         }
     }
+}
+
+function Get-SqlResourceProviderRegistrationState {
+    <#
+    .SYNOPSIS
+        Gets the Microsoft.Sql registration state for a subscription.
+    .PARAMETER SubscriptionId
+        Subscription ID to inspect.
+    .PARAMETER ArmAccessToken
+        OAuth bearer token for Azure Resource Manager.
+    .PARAMETER MaxRetryCount
+        Maximum retries after the initial HTTP request.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+        [string]$SubscriptionId,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ArmAccessToken,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 10)]
+        [int]$MaxRetryCount
+    )
+
+    $ProviderUri = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.Sql?api-version=2021-04-01"
+    $Provider = Invoke-AzureRestRequest -Method Get -Uri $ProviderUri -AccessToken $ArmAccessToken -MaxRetryCount $MaxRetryCount
+    return [string]$Provider.registrationState
+}
+
+function Get-AccessibleTenantSubscriptionId {
+    <#
+    .SYNOPSIS
+        Gets enabled subscriptions accessible to the managed identity in a tenant.
+    .PARAMETER TenantId
+        Microsoft Entra tenant ID used to filter subscriptions.
+    .PARAMETER ArmAccessToken
+        OAuth bearer token for Azure Resource Manager.
+    .PARAMETER MaxRetryCount
+        Maximum retries after each initial HTTP request.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ArmAccessToken,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 10)]
+        [int]$MaxRetryCount
+    )
+
+    $SubscriptionIds = [System.Collections.Generic.List[string]]::new()
+    $RequestUri = 'https://management.azure.com/subscriptions?api-version=2022-12-01'
+
+    while (-not [string]::IsNullOrWhiteSpace($RequestUri)) {
+        $Response = Invoke-AzureRestRequest -Method Get -Uri $RequestUri -AccessToken $ArmAccessToken -MaxRetryCount $MaxRetryCount
+        foreach ($Subscription in @($Response.value)) {
+            if ([string]$Subscription.tenantId -eq $TenantId -and [string]$Subscription.state -eq 'Enabled') {
+                $SubscriptionIds.Add([string]$Subscription.subscriptionId)
+            }
+        }
+
+        $RequestUri = [string]$Response.nextLink
+    }
+
+    if ($SubscriptionIds.Count -eq 0) {
+        throw "The Automation Account managed identity cannot access any enabled subscriptions in tenant $TenantId."
+    }
+
+    return $SubscriptionIds.ToArray()
 }
 
 function ConvertTo-SqlMiQuotaRecord {
@@ -287,6 +391,8 @@ function Get-LogsIngestionUri {
         Immutable ID of the Data Collection Rule.
     .PARAMETER StreamName
         Input stream name accepted by the Data Collection Rule.
+    .PARAMETER ApiVersion
+        API version used by the Logs Ingestion API.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -298,20 +404,23 @@ function Get-LogsIngestionUri {
         [string]$DcrImmutableId,
 
         [Parameter(Mandatory = $true)]
-        [string]$StreamName
+        [string]$StreamName,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ApiVersion = '2023-01-01'
     )
 
     $Endpoint = $LogsIngestionEndpoint.TrimEnd('/')
     $EncodedStreamName = [Uri]::EscapeDataString($StreamName)
-    return "$Endpoint/dataCollectionRules/$DcrImmutableId/streams/${EncodedStreamName}?api-version=2023-01-01"
+    return "$Endpoint/dataCollectionRules/$DcrImmutableId/streams/${EncodedStreamName}?api-version=$ApiVersion"
 }
 
 function Invoke-SqlMiQuotaCollection {
     <#
     .SYNOPSIS
         Collects and ingests SQL MI quota records for all configured scopes.
-    .PARAMETER SubscriptionIds
-        Source subscription IDs.
+    .PARAMETER TenantId
+        Microsoft Entra tenant containing the subscriptions to query.
     .PARAMETER Regions
         Azure regions to query.
     .PARAMETER UsageNames
@@ -322,6 +431,10 @@ function Invoke-SqlMiQuotaCollection {
         Immutable ID of the Data Collection Rule.
     .PARAMETER StreamName
         Input stream name accepted by the DCR.
+    .PARAMETER SqlUsageApiVersion
+        API version used to query Microsoft.Sql regional usage.
+    .PARAMETER LogsIngestionApiVersion
+        API version used to send records through the Logs Ingestion API.
     .PARAMETER MaxRetryCount
         Maximum retries after each initial HTTP request.
     #>
@@ -329,7 +442,8 @@ function Invoke-SqlMiQuotaCollection {
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $true)]
-        [string[]]$SubscriptionIds,
+        [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+        [string]$TenantId,
 
         [Parameter(Mandatory = $true)]
         [string[]]$Regions,
@@ -346,27 +460,64 @@ function Invoke-SqlMiQuotaCollection {
         [Parameter(Mandatory = $true)]
         [string]$StreamName,
 
+        [Parameter(Mandatory = $false)]
+        [string]$SqlUsageApiVersion = '2023-08-01',
+
+        [Parameter(Mandatory = $false)]
+        [string]$LogsIngestionApiVersion = '2023-01-01',
+
         [Parameter(Mandatory = $true)]
         [int]$MaxRetryCount
     )
 
     $ArmAccessToken = Get-ManagedIdentityAccessToken -Resource 'https://management.azure.com/'
+    $SubscriptionIds = @(Get-AccessibleTenantSubscriptionId -TenantId $TenantId -ArmAccessToken $ArmAccessToken -MaxRetryCount $MaxRetryCount)
     $MonitorAccessToken = Get-ManagedIdentityAccessToken -Resource 'https://monitor.azure.com/'
-    $IngestionUri = Get-LogsIngestionUri -LogsIngestionEndpoint $LogsIngestionEndpoint -DcrImmutableId $DcrImmutableId -StreamName $StreamName
+    $IngestionUri = Get-LogsIngestionUri -LogsIngestionEndpoint $LogsIngestionEndpoint -DcrImmutableId $DcrImmutableId -StreamName $StreamName -ApiVersion $LogsIngestionApiVersion
     $RecordCount = 0
     $QueryCount = 0
+    $SkippedSubscriptionCount = 0
+    $FailureMessages = [System.Collections.Generic.List[string]]::new()
 
     foreach ($SubscriptionId in $SubscriptionIds) {
         $ParsedSubscriptionId = [guid]::Empty
         if (-not [guid]::TryParse($SubscriptionId, [ref]$ParsedSubscriptionId)) {
-            throw "SubscriptionIdsJson contains an invalid subscription ID: $SubscriptionId"
+            $FailureMessage = "Azure Resource Manager returned an invalid subscription ID: $SubscriptionId"
+            $FailureMessages.Add($FailureMessage)
+            Write-Warning $FailureMessage
+            continue
+        }
+
+        try {
+            $RegistrationState = Get-SqlResourceProviderRegistrationState -SubscriptionId $SubscriptionId -ArmAccessToken $ArmAccessToken -MaxRetryCount $MaxRetryCount
+        }
+        catch {
+            $FailureMessage = "Provider check failed for subscription ${SubscriptionId}: $($_.Exception.Message)"
+            $FailureMessages.Add($FailureMessage)
+            Write-Warning $FailureMessage
+            continue
+        }
+
+        if ($RegistrationState -ne 'Registered') {
+            $SkippedSubscriptionCount++
+            Write-Warning "Skipping subscription $SubscriptionId because Microsoft.Sql is $RegistrationState."
+            continue
         }
 
         foreach ($Region in $Regions) {
             $QueryCount++
             $EncodedRegion = [Uri]::EscapeDataString($Region)
-            $UsageUri = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.Sql/locations/$EncodedRegion/usages?api-version=2023-08-01"
-            $UsageResponse = Invoke-AzureRestRequest -Method Get -Uri $UsageUri -AccessToken $ArmAccessToken -MaxRetryCount $MaxRetryCount
+            $UsageUri = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.Sql/locations/$EncodedRegion/usages?api-version=$SqlUsageApiVersion"
+            try {
+                $UsageResponse = Invoke-AzureRestRequest -Method Get -Uri $UsageUri -AccessToken $ArmAccessToken -MaxRetryCount $MaxRetryCount
+            }
+            catch {
+                $FailureMessage = "Usage query failed for subscription $SubscriptionId in ${Region}: $($_.Exception.Message)"
+                $FailureMessages.Add($FailureMessage)
+                Write-Warning $FailureMessage
+                continue
+            }
+
             $TimeGenerated = [datetime]::UtcNow
             $Records = @(
                 $UsageResponse.value |
@@ -382,15 +533,30 @@ function Invoke-SqlMiQuotaCollection {
             }
 
             $Body = ConvertTo-Json -InputObject $Records -Depth 5 -Compress
-            $null = Invoke-AzureRestRequest -Method Post -Uri $IngestionUri -AccessToken $MonitorAccessToken -Body $Body -MaxRetryCount $MaxRetryCount
+            try {
+                $null = Invoke-AzureRestRequest -Method Post -Uri $IngestionUri -AccessToken $MonitorAccessToken -Body $Body -MaxRetryCount $MaxRetryCount
+            }
+            catch {
+                $FailureMessage = "Log ingestion failed for subscription $SubscriptionId in ${Region}: $($_.Exception.Message)"
+                $FailureMessages.Add($FailureMessage)
+                Write-Warning $FailureMessage
+                continue
+            }
+
             $RecordCount += $Records.Count
             Write-Information "Ingested $($Records.Count) SQL MI quota records for subscription $SubscriptionId in $Region."
         }
     }
 
+    if ($FailureMessages.Count -gt 0) {
+        $FailureSummary = $FailureMessages -join [Environment]::NewLine
+        throw "SQL MI quota collection completed with $($FailureMessages.Count) failure(s):$([Environment]::NewLine)$FailureSummary"
+    }
+
     return [pscustomobject]@{
-        QueryCount  = $QueryCount
-        RecordCount = $RecordCount
+        QueryCount               = $QueryCount
+        RecordCount              = $RecordCount
+        SkippedSubscriptionCount = $SkippedSubscriptionCount
     }
 }
 
@@ -400,12 +566,11 @@ function Invoke-SqlMiQuotaCollection {
 
 if ($MyInvocation.InvocationName -ne '.') {
     try {
-        $SubscriptionIds = ConvertFrom-JsonArrayParameter -Json $SubscriptionIdsJson -ParameterName 'SubscriptionIdsJson'
         $Regions = ConvertFrom-JsonArrayParameter -Json $RegionsJson -ParameterName 'RegionsJson'
         $UsageNames = ConvertFrom-JsonArrayParameter -Json $UsageNamesJson -ParameterName 'UsageNamesJson'
 
-        $Result = Invoke-SqlMiQuotaCollection -SubscriptionIds $SubscriptionIds -Regions $Regions -UsageNames $UsageNames -LogsIngestionEndpoint $LogsIngestionEndpoint -DcrImmutableId $DcrImmutableId -StreamName $StreamName -MaxRetryCount $MaxRetryCount
-        Write-Output "Completed $($Result.QueryCount) queries and ingested $($Result.RecordCount) records."
+        $Result = Invoke-SqlMiQuotaCollection -TenantId $TenantId -Regions $Regions -UsageNames $UsageNames -LogsIngestionEndpoint $LogsIngestionEndpoint -DcrImmutableId $DcrImmutableId -StreamName $StreamName -SqlUsageApiVersion $SqlUsageApiVersion -LogsIngestionApiVersion $LogsIngestionApiVersion -MaxRetryCount $MaxRetryCount
+        Write-Output "Completed $($Result.QueryCount) queries, ingested $($Result.RecordCount) records, and skipped $($Result.SkippedSubscriptionCount) subscriptions without Microsoft.Sql registration."
     }
     catch {
         Write-Error -ErrorAction Continue "SQL MI quota collection failed: $($_.Exception.Message)"

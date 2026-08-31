@@ -2,7 +2,8 @@ using './main.bicep'
 
 param location = 'eastus2'
 param resourceGroupName = 'rg-sqlmi-quota-monitoring'
-param logAnalyticsWorkspaceName = 'law-sqlmi-quota-monitoring'
+param logAnalyticsWorkspaceName = 'law-sqlmi-quota-monitoring-a1b2c'
+param shouldCreateLogAnalyticsWorkspace = true
 param tableName = 'SqlMiQuota_CL'
 param dataCollectionRuleName = 'dcr-sqlmi-quota-monitoring'
 param automationAccountName = 'aa-sqlmi-quota-monitoring'

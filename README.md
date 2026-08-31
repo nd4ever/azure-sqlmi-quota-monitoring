@@ -17,8 +17,8 @@ Data Collection Endpoint (DCE) is not required for public network ingestion.
 
 ```mermaid
 flowchart LR
-    SUB[Source subscriptions] -->|Reader| AA[Azure Automation runbook]
-    AA -->|Microsoft.Sql usages API| SUB
+    TENANT[Enabled tenant subscriptions] -->|Reader| AA[Azure Automation runbook]
+    AA -->|Discover and query Microsoft.Sql usage| TENANT
     AA -->|Monitoring Metrics Publisher| DCR[Direct DCR endpoint]
     DCR --> TABLE[Custom Log Analytics table]
     TABLE --> LAW[Log Analytics workspace]
@@ -26,21 +26,23 @@ flowchart LR
 
 ## Deployed resources
 
-The subscription-scoped Bicep template creates:
+The subscription-scoped Bicep template creates or configures:
 
 * Resource group
-* Log Analytics workspace with 30-day retention
+* New Log Analytics workspace with 30-day retention, or a selected existing workspace
 * Custom Analytics table for quota records
 * Direct Data Collection Rule and transformation
 * Azure Automation Account with a system-assigned managed identity
 * PowerShell 7.2 runbook shell
 * Daily Automation schedule
-* `Reader` assignments on the selected source subscriptions
+* `Reader` assignments on enabled subscriptions accessible during deployment
 * `Monitoring Metrics Publisher` on the DCR
 
-The deployment script publishes the local runbook and links it to the schedule.
-No subscription IDs, resource IDs, endpoints, credentials, or existing managed
-identities are embedded in the repository.
+The deployment script renders the tenant ID, regions, DCR endpoint, immutable
+DCR ID, stream name, and usage counters into a temporary runbook copy. It
+publishes those values as Azure Automation parameter defaults and links the
+runbook to the schedule. No subscription IDs, resource IDs, endpoints,
+credentials, or existing managed identities are embedded in the repository.
 
 ## Collected counters
 
@@ -62,7 +64,7 @@ Install or configure:
 * Azure CLI `automation` extension
 * An authenticated Azure CLI session
 * Permission to create resources and role assignments in the deployment scope
-* `Reader` role assignment permission on every source subscription
+* `Reader` role assignment permission on every enabled subscription in the tenant
 
 ```powershell
 az login
@@ -72,27 +74,60 @@ az bicep install
 
 The deployment identity typically needs `Contributor` plus `User Access
 Administrator` at the target resource group or subscription. It also needs role
-assignment permission on each source subscription. Runtime access is narrower:
-the Automation Account receives only the two roles listed above.
+assignment permission on each enabled tenant subscription returned by Azure
+CLI. Runtime access is narrower: the Automation Account receives only the two
+roles listed above.
 
 ## Deploy
 
-Choose globally valid names where Azure requires them, then run:
+Run the deployment script and follow the prompts to select an existing Log
+Analytics workspace or create a new one:
 
 ```powershell
 ./scripts/Deploy-Solution.ps1 `
     -DeploymentSubscriptionId '00000000-0000-0000-0000-000000000000' `
     -Location 'eastus2' `
     -ResourceGroupName 'rg-sqlmi-quota-monitoring' `
-    -LogAnalyticsWorkspaceName 'law-sqlmi-quota-monitoring' `
     -TableName 'SqlMiQuota_CL' `
     -DataCollectionRuleName 'dcr-sqlmi-quota-monitoring' `
     -AutomationAccountName 'aa-sqlmi-quota-monitoring' `
-    -SourceSubscriptionIds @(
-        '00000000-0000-0000-0000-000000000000',
-        '11111111-1111-1111-1111-111111111111'
-    ) `
+    -TenantId '00000000-0000-0000-0000-000000000000' `
     -Regions @('eastus2', 'centralus')
+```
+
+Omit `-TenantId` to use the Microsoft Entra tenant associated with the
+deployment subscription. The deployer assigns the Automation Account identity
+`Reader` on every enabled subscription it can enumerate in that tenant. At run
+time, the runbook discovers enabled subscriptions visible to its identity, so
+the runbook does not require a subscription array parameter.
+
+For a new workspace, enter its base name. The script appends a hyphen and five
+deterministic hexadecimal characters, such as
+`law-sqlmi-quota-monitoring-a1b2c`, to reduce naming collisions while ensuring
+that redeployments reuse the same workspace. The new workspace is created in
+the solution resource group.
+
+For an existing workspace, enter its current name. The script finds it in the
+deployment subscription, deploys the custom table there, and places the Data
+Collection Rule in the workspace's region. If more than one resource group
+contains that name, specify
+`-LogAnalyticsWorkspaceResourceGroupName`.
+
+For unattended deployment, provide the choice and name as parameters:
+
+```powershell
+# Create a workspace named from the supplied base plus a stable suffix.
+./scripts/Deploy-Solution.ps1 `
+    -LogAnalyticsWorkspaceMode New `
+    -LogAnalyticsWorkspaceName 'law-sqlmi-quota-monitoring' `
+    <other parameters>
+
+# Use an existing workspace without changing its name.
+./scripts/Deploy-Solution.ps1 `
+    -LogAnalyticsWorkspaceMode Existing `
+    -LogAnalyticsWorkspaceName 'law-shared-monitoring' `
+    -LogAnalyticsWorkspaceResourceGroupName 'rg-shared-monitoring' `
+    <other parameters>
 ```
 
 The schedule starts approximately one hour after deployment and repeats daily
@@ -103,6 +138,10 @@ The time zone must be an IANA value supported by Azure Automation, such as
 Use `-SkipSourceReaderRole` or `-SkipIngestionRole` only when those assignments
 are managed separately. The Automation Account identity must have equivalent
 permissions before the runbook starts.
+
+The published defaults also allow a manual job to start without re-entering
+deployment values. Schedule links contain no duplicate environment parameters;
+scheduled jobs inherit the same published defaults.
 
 ## Query quota usage
 

@@ -12,6 +12,15 @@ param resourceGroupName string
 @description('Name of the Log Analytics workspace.')
 param logAnalyticsWorkspaceName string
 
+@description('Resource group containing the Log Analytics workspace.')
+param logAnalyticsWorkspaceResourceGroupName string = resourceGroupName
+
+@description('Subscription containing the Log Analytics workspace.')
+param logAnalyticsWorkspaceSubscriptionId string = subscription().subscriptionId
+
+@description('Whether to create the Log Analytics workspace.')
+param shouldCreateLogAnalyticsWorkspace bool = true
+
 @description('Name of the Log Analytics custom table. The name must end with _CL.')
 param tableName string
 
@@ -52,14 +61,30 @@ resource resourceGroupResource 'Microsoft.Resources/resourceGroups@2024-03-01' =
   tags: tags
 }
 
+module logAnalytics 'modules/log-analytics.bicep' = {
+  name: 'sqlmi-quota-log-analytics'
+  scope: resourceGroup(logAnalyticsWorkspaceSubscriptionId, logAnalyticsWorkspaceResourceGroupName)
+  params: {
+    location: location
+    logAnalyticsWorkspaceName: logAnalyticsWorkspaceName
+    shouldCreateLogAnalyticsWorkspace: shouldCreateLogAnalyticsWorkspace
+    tableName: tableName
+    tags: tags
+  }
+  dependsOn: [
+    resourceGroupResource
+  ]
+}
+
 module solution 'modules/solution.bicep' = {
   name: 'sqlmi-quota-monitoring'
   scope: resourceGroupResource
   params: {
     automationAccountName: automationAccountName
     dataCollectionRuleName: dataCollectionRuleName
+    dataCollectionRuleLocation: logAnalytics.outputs.logAnalyticsWorkspaceLocation
     location: location
-    logAnalyticsWorkspaceName: logAnalyticsWorkspaceName
+    logAnalyticsWorkspaceResourceId: logAnalytics.outputs.logAnalyticsWorkspaceId
     runbookName: runbookName
     scheduleName: scheduleName
     scheduleStartTime: scheduleStartTime

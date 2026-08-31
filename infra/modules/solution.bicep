@@ -10,8 +10,11 @@ param dataCollectionRuleName string
 @description('Azure region for all resources.')
 param location string
 
-@description('Name of the Log Analytics workspace.')
-param logAnalyticsWorkspaceName string
+@description('Azure region for the Data Collection Rule. It must match the Log Analytics workspace region.')
+param dataCollectionRuleLocation string
+
+@description('Resource ID of the Log Analytics workspace.')
+param logAnalyticsWorkspaceResourceId string
 
 @description('Name of the PowerShell 7.2 runbook.')
 param runbookName string
@@ -39,72 +42,9 @@ var outputStreamName = 'Custom-${tableName}'
 var logAnalyticsDestinationName = 'logAnalytics'
 var monitoringMetricsPublisherRoleDefinitionId = '3913510d-42f4-4e42-8a64-420c390055eb'
 
-resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
-  name: logAnalyticsWorkspaceName
-  location: location
-  tags: tags
-  properties: {
-    features: {
-      enableLogAccessUsingOnlyResourcePermissions: true
-    }
-    publicNetworkAccessForIngestion: 'Enabled'
-    publicNetworkAccessForQuery: 'Enabled'
-    retentionInDays: 30
-    sku: {
-      name: 'PerGB2018'
-    }
-  }
-}
-
-resource quotaTable 'Microsoft.OperationalInsights/workspaces/tables@2023-09-01' = {
-  parent: logAnalyticsWorkspace
-  name: tableName
-  properties: {
-    plan: 'Analytics'
-    retentionInDays: 30
-    schema: {
-      name: tableName
-      columns: [
-        {
-          name: 'TimeGenerated'
-          type: 'dateTime'
-        }
-        {
-          name: 'Name'
-          type: 'string'
-        }
-        {
-          name: 'DisplayName'
-          type: 'string'
-        }
-        {
-          name: 'CurrentValue'
-          type: 'real'
-        }
-        {
-          name: 'Limit'
-          type: 'real'
-        }
-        {
-          name: 'Unit'
-          type: 'string'
-        }
-        {
-          name: 'Region'
-          type: 'string'
-        }
-        {
-          name: 'SubscriptionId'
-          type: 'string'
-        }
-      ]
-    }
-  }
-}
-
 resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2023-03-11' = {
   name: dataCollectionRuleName
-  location: location
+  location: dataCollectionRuleLocation
   kind: 'Direct'
   tags: tags
   properties: {
@@ -150,7 +90,7 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2023-03-11' 
       logAnalytics: [
         {
           name: logAnalyticsDestinationName
-          workspaceResourceId: logAnalyticsWorkspace.id
+          workspaceResourceId: logAnalyticsWorkspaceResourceId
         }
       ]
     }
@@ -167,9 +107,6 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2023-03-11' 
       }
     ]
   }
-  dependsOn: [
-    quotaTable
-  ]
 }
 
 resource automationAccount 'Microsoft.Automation/automationAccounts@2023-11-01' = {
