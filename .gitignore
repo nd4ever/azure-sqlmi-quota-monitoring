@@ -1,0 +1,17 @@
+# Local deployment values
+*.local.bicepparam
+*.local.json
+
+# Generated Bicep output
+infra/main.json
+infra/main.sample.json
+
+# Test and package output
+logs/
+node_modules/
+coverage/
+
+# Editor and operating system files
+.DS_Store
+Thumbs.db
+.vscode/

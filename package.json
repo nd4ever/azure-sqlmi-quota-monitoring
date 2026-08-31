@@ -1,0 +1,13 @@
+{
+  "name": "azure-sqlmi-quota-monitoring",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deploy Azure SQL Managed Instance quota monitoring with Azure Automation and Log Analytics.",
+  "scripts": {
+    "build:bicep": "pwsh -NoProfile -File ./scripts/Invoke-BicepBuild.ps1",
+    "lint:ps": "pwsh -NoProfile -File ./scripts/Invoke-Lint.ps1",
+    "test": "npm run test:ps",
+    "test:ps": "pwsh -NoProfile -File ./scripts/Invoke-Tests.ps1",
+    "validate": "npm run build:bicep && npm run lint:ps && npm run test:ps"
+  }
+}
