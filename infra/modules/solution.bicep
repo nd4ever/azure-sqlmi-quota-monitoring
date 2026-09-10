@@ -31,6 +31,17 @@ param scheduleTimeZone string
 @description('Whether to grant the Automation Account Monitoring Metrics Publisher on the DCR.')
 param shouldAssignIngestionRole bool
 
+@description('Whether to create an Azure Monitor alert for SQL Managed Instance quota usage.')
+param shouldCreateQuotaAlert bool
+
+@description('DisplayName column value monitored by the Azure Monitor alert.')
+param quotaAlertDisplayName string?
+
+@description('Quota usage percentage that causes the Azure Monitor alert to fire.')
+@minValue(1)
+@maxValue(100)
+param quotaAlertThresholdPercentage int
+
 @description('Name of the Log Analytics custom table.')
 param tableName string
 
@@ -158,6 +169,19 @@ resource ingestionRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-0
   }
 }
 
+module quotaUsageAlert 'quota-alert.bicep' = if (shouldCreateQuotaAlert) {
+  name: 'sqlmi-quota-usage-alert'
+  params: {
+    alertRuleName: 'sqlmi-quota-usage-alert'
+    location: dataCollectionRuleLocation
+    logAnalyticsWorkspaceResourceId: logAnalyticsWorkspaceResourceId
+    quotaAlertDisplayName: quotaAlertDisplayName ?? ''
+    quotaAlertThresholdPercentage: quotaAlertThresholdPercentage
+    tableName: tableName
+    tags: tags
+  }
+}
+
 @description('Resource ID of the Azure Automation Account.')
 output automationAccountId string = automationAccount.id
 
@@ -181,3 +205,6 @@ output streamName string = inputStreamName
 
 @description('Name of the deployed Azure Automation schedule.')
 output scheduleName string = dailySchedule.name
+
+@description('Resource ID of the Azure Monitor quota alert, or null when alert creation is disabled.')
+output quotaAlertRuleId string? = quotaUsageAlert.?outputs.?quotaAlertRuleId

@@ -233,6 +233,45 @@ Describe 'Resolve-LogAnalyticsWorkspaceConfiguration' -Tag 'Unit' {
     }
 }
 
+Describe 'Resolve-QuotaAlertConfiguration' -Tag 'Unit' {
+    It 'prompts for alert creation, threshold, and DisplayName when omitted' {
+        Mock Read-Host { return 'Y' } -ParameterFilter { $Prompt -like 'Create an Azure Monitor alert*' }
+        Mock Read-Host { return '80' } -ParameterFilter { $Prompt -like 'Enter the quota alert threshold*' }
+        Mock Read-Host { return 'VCore quota for Standard Series SQL Managed Instance' } -ParameterFilter { $Prompt -like 'Enter the quota DisplayName*' }
+
+        $Result = Resolve-QuotaAlertConfiguration
+
+        $Result.ShouldCreate | Should -BeTrue
+        $Result.ThresholdPercentage | Should -Be 80
+        $Result.DisplayName | Should -Be 'VCore quota for Standard Series SQL Managed Instance'
+        Should -Invoke Read-Host -Times 3 -Exactly
+    }
+
+    It 'does not prompt for alert details when creation is declined' {
+        Mock Read-Host { return 'N' }
+
+        $Result = Resolve-QuotaAlertConfiguration
+
+        $Result.ShouldCreate | Should -BeFalse
+        $Result.DisplayName | Should -BeNullOrEmpty
+        Should -Invoke Read-Host -Times 1 -Exactly
+    }
+
+    It 'supports non-interactive alert configuration' {
+        Mock Read-Host {}
+
+        $Result = Resolve-QuotaAlertConfiguration `
+            -ShouldCreate $true `
+            -ThresholdPercentage 90 `
+            -DisplayName 'Managed Instance free vCore hours left'
+
+        $Result.ShouldCreate | Should -BeTrue
+        $Result.ThresholdPercentage | Should -Be 90
+        $Result.DisplayName | Should -Be 'Managed Instance free vCore hours left'
+        Should -Invoke Read-Host -Times 0 -Exactly
+    }
+}
+
 Describe 'Invoke-SqlMiQuotaCollection' -Tag 'Unit' {
     BeforeEach {
         $script:PostedBodies = @()

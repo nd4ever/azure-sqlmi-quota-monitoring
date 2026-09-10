@@ -39,6 +39,12 @@
     Azure regions queried in each source subscription.
 .PARAMETER UsageNames
     Microsoft.Sql usage counters written to Log Analytics.
+.PARAMETER ShouldCreateQuotaAlert
+    Whether to create an Azure Monitor alert. Prompts when omitted.
+.PARAMETER QuotaAlertThresholdPercentage
+    Percentage of Limit at which the quota alert fires. Prompts when alert creation is enabled and omitted.
+.PARAMETER QuotaAlertDisplayName
+    DisplayName column value monitored by the quota alert. Prompts when alert creation is enabled and omitted.
 .PARAMETER SkipSourceReaderRole
     Omits Reader assignments on source subscriptions.
 .PARAMETER SkipIngestionRole
@@ -119,6 +125,17 @@ param(
         'SubscriptionSQLManagedInstancePremiumSeriesVCoreQuota',
         'SubscriptionSQLManagedInstancePremiumSeriesMemoryOptimizedVCoreQuota'
     ),
+
+    [Parameter(Mandatory = $false)]
+    [Nullable[bool]]$ShouldCreateQuotaAlert,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 100)]
+    [Nullable[int]]$QuotaAlertThresholdPercentage,
+
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [string]$QuotaAlertDisplayName,
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipSourceReaderRole,
@@ -459,6 +476,94 @@ function Resolve-LogAnalyticsWorkspaceConfiguration {
     }
 }
 
+function Read-YesNoChoice {
+    <#
+    .SYNOPSIS
+        Prompts until the user enters a yes or no response.
+    .PARAMETER Prompt
+        Prompt displayed to the user.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Prompt
+    )
+
+    while ($true) {
+        $Selection = (Read-Host "$Prompt [Y/N]").Trim()
+        switch ($Selection.ToLowerInvariant()) {
+            { $_ -in @('y', 'yes') } { return $true }
+            { $_ -in @('n', 'no') } { return $false }
+            default { Write-Warning 'Enter Y for Yes or N for No.' }
+        }
+    }
+}
+
+function Resolve-QuotaAlertConfiguration {
+    <#
+    .SYNOPSIS
+        Resolves Azure Monitor quota alert prompts and deployment parameters.
+    .PARAMETER ShouldCreate
+        Whether to create the alert. Prompts when omitted.
+    .PARAMETER ThresholdPercentage
+        Percentage of Limit at which the alert fires. Prompts when omitted.
+    .PARAMETER DisplayName
+        DisplayName column value monitored by the alert. Prompts when omitted.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [Nullable[bool]]$ShouldCreate,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 100)]
+        [Nullable[int]]$ThresholdPercentage,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$DisplayName
+    )
+
+    if ($null -eq $ShouldCreate) {
+        $ShouldCreate = Read-YesNoChoice -Prompt 'Create an Azure Monitor alert for quota usage?'
+    }
+
+    if (-not $ShouldCreate) {
+        return [pscustomobject]@{
+            ShouldCreate        = $false
+            ThresholdPercentage = 80
+            DisplayName         = $null
+        }
+    }
+
+    while ($null -eq $ThresholdPercentage) {
+        $ThresholdText = (Read-Host 'Enter the quota alert threshold percentage (1-100, for example 80)').Trim()
+        $ParsedThreshold = 0
+        if ([int]::TryParse($ThresholdText, [ref]$ParsedThreshold) -and $ParsedThreshold -ge 1 -and $ParsedThreshold -le 100) {
+            $ThresholdPercentage = $ParsedThreshold
+        }
+        else {
+            Write-Warning 'Enter a whole number from 1 through 100.'
+        }
+    }
+
+    while ([string]::IsNullOrWhiteSpace($DisplayName)) {
+        $DisplayName = (Read-Host 'Enter the quota DisplayName to monitor').Trim()
+        if ([string]::IsNullOrWhiteSpace($DisplayName)) {
+            Write-Warning 'DisplayName cannot be empty.'
+        }
+    }
+
+    return [pscustomobject]@{
+        ShouldCreate        = $true
+        ThresholdPercentage = [int]$ThresholdPercentage
+        DisplayName         = $DisplayName
+    }
+}
+
 #endregion Functions
 
 #region Main Execution
@@ -525,6 +630,11 @@ if ($MyInvocation.InvocationName -ne '.') {
             Write-Information "Using existing Log Analytics workspace $($WorkspaceConfiguration.Name)." -InformationAction Continue
         }
 
+        $QuotaAlertConfiguration = Resolve-QuotaAlertConfiguration `
+            -ShouldCreate $ShouldCreateQuotaAlert `
+            -ThresholdPercentage $QuotaAlertThresholdPercentage `
+            -DisplayName $QuotaAlertDisplayName
+
         $ParameterDocument = @{
             '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
             contentVersion = '1.0.0.0'
@@ -545,6 +655,9 @@ if ($MyInvocation.InvocationName -ne '.') {
                 shouldCreateLogAnalyticsWorkspace = @{ value = $WorkspaceConfiguration.ShouldCreate }
                 shouldAssignSourceReaderRole   = @{ value = -not $SkipSourceReaderRole.IsPresent }
                 shouldAssignIngestionRole      = @{ value = -not $SkipIngestionRole.IsPresent }
+                shouldCreateQuotaAlert         = @{ value = $QuotaAlertConfiguration.ShouldCreate }
+                quotaAlertThresholdPercentage  = @{ value = $QuotaAlertConfiguration.ThresholdPercentage }
+                quotaAlertDisplayName           = @{ value = $QuotaAlertConfiguration.DisplayName }
             }
         }
 
@@ -659,6 +772,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             LogAnalyticsWorkspaceName = $WorkspaceConfiguration.Name
             AutomationAccountId   = $AutomationAccountId
             DataCollectionRuleId  = [string]$DeploymentOutputs.dataCollectionRuleId.value
+            QuotaAlertRuleId      = [string]$DeploymentOutputs.quotaAlertRuleId.value
             RunbookName           = $RunbookName
             ScheduleName          = $ScheduleName
             TenantId              = $ResolvedTenantId
