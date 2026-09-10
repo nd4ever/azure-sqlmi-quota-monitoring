@@ -24,6 +24,17 @@ param shouldCreateLogAnalyticsWorkspace bool = true
 @description('Name of the Log Analytics custom table. The name must end with _CL.')
 param tableName string
 
+@description('Whether to create an Azure Monitor alert for SQL Managed Instance quota usage.')
+param shouldCreateQuotaAlert bool = false
+
+@description('Quota usage percentage that causes the Azure Monitor alert to fire.')
+@minValue(1)
+@maxValue(100)
+param quotaAlertThresholdPercentage int = 80
+
+@description('DisplayName column value monitored by the Azure Monitor alert.')
+param quotaAlertDisplayName string?
+
 @description('Name of the direct Data Collection Rule.')
 param dataCollectionRuleName string
 
@@ -90,6 +101,9 @@ module solution 'modules/solution.bicep' = {
     scheduleStartTime: scheduleStartTime
     scheduleTimeZone: scheduleTimeZone
     shouldAssignIngestionRole: shouldAssignIngestionRole
+    shouldCreateQuotaAlert: shouldCreateQuotaAlert
+    quotaAlertDisplayName: quotaAlertDisplayName
+    quotaAlertThresholdPercentage: quotaAlertThresholdPercentage
     tableName: tableName
     tags: tags
   }
@@ -126,3 +140,6 @@ output logsIngestionEndpoint string = solution.outputs.logsIngestionEndpoint
 
 @description('Input stream name accepted by the Data Collection Rule.')
 output streamName string = solution.outputs.streamName
+
+@description('Resource ID of the Azure Monitor quota alert, or null when alert creation is disabled.')
+output quotaAlertRuleId string? = solution.outputs.?quotaAlertRuleId

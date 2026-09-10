@@ -1,7 +1,7 @@
 ---
 title: Azure SQL Managed Instance Quota Monitoring
 description: Deploy reusable SQL Managed Instance quota collection with Azure Automation and Azure Monitor Logs
-ms.date: 2026-08-31
+ms.date: 2026-09-10
 ms.topic: how-to
 ---
 
@@ -22,6 +22,7 @@ flowchart LR
     AA -->|Monitoring Metrics Publisher| DCR[Direct DCR endpoint]
     DCR --> TABLE[Custom Log Analytics table]
     TABLE --> LAW[Log Analytics workspace]
+    TABLE --> ALERT[Optional quota usage alert]
 ```
 
 ## Deployed resources
@@ -35,6 +36,7 @@ The subscription-scoped Bicep template creates or configures:
 * Azure Automation Account with a system-assigned managed identity
 * PowerShell 7.2 runbook shell
 * Daily Automation schedule
+* Optional Azure Monitor scheduled query alert
 * `Reader` assignments on enabled subscriptions accessible during deployment
 * `Monitoring Metrics Publisher` on the DCR
 
@@ -81,7 +83,9 @@ roles listed above.
 ## Deploy
 
 Run the deployment script and follow the prompts to select an existing Log
-Analytics workspace or create a new one:
+Analytics workspace or create a new one. The script also asks whether to create
+a quota usage alert. When enabled, enter a percentage from 1 through 100 and
+the `DisplayName` value to monitor:
 
 ```powershell
 ./scripts/Deploy-Solution.ps1 `
@@ -129,6 +133,27 @@ For unattended deployment, provide the choice and name as parameters:
     -LogAnalyticsWorkspaceResourceGroupName 'rg-shared-monitoring' `
     <other parameters>
 ```
+
+Provide all three alert parameters to avoid alert prompts during unattended
+deployment:
+
+```powershell
+./scripts/Deploy-Solution.ps1 `
+    -ShouldCreateQuotaAlert $true `
+    -QuotaAlertThresholdPercentage 80 `
+    -QuotaAlertDisplayName 'VCore quota for Standard Series SQL Managed Instance' `
+    <other parameters>
+```
+
+The alert evaluates hourly and uses the latest matching record for each
+subscription, region, and quota name from the previous two days. It fires when
+`CurrentValue / Limit * 100` reaches the configured threshold. The
+`DisplayName` match is case-insensitive.
+
+> [!NOTE]
+> The deployment creates the Azure Monitor alert rule without an Action Group.
+> The fired alert is available in Azure Monitor. Attach an Action Group to the
+> rule when email, SMS, webhook, or another notification channel is required.
 
 The schedule starts approximately one hour after deployment and repeats daily
 in UTC. Use `-ScheduleStartTime` and `-ScheduleTimeZone` to change that behavior.
